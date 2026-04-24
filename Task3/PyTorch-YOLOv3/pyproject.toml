@@ -8,25 +8,19 @@ authors = ["Florian Vahl <git@flova.de>", "Erik Linder-Noren <eriklindernoren@gm
 license = "GPL-3.0"
 
 [tool.poetry.dependencies]
-python = ">=3.8,<4.0"
-torch = ">=1.10.1, < 1.13.0"
-torchvision = ">=0.13.1"
-matplotlib = "^3.3.3"
-tensorboard = "^2.10.0"
+python = ">=3.9,<3.13"
+torch = ">=2.1,<2.8"
+torchvision = ">=0.16,<0.23"
+matplotlib = "^3.7"
+tensorboard = "^2.14"
 terminaltables = "^3.1.0"
-Pillow = "^9.1.0"
+Pillow = ">=9.1,<11.0"
 tqdm = "^4.64.1"
-urllib3 =  [
-    {version = "<=1.22", python = ">=3.8,<3.9"},
-    {version = "^1.23", python = ">=3.9"}
-] # Temp pin because of crash issue
-scipy = [
-    {version = "<=1.6", python = ">=3.8,<3.9"},
-    {version = "^1.9", python = ">=3.9,<4.0"}
-]
+urllib3 = ">=1.26,<3"
+scipy = "^1.11"
 imgaug = "^0.4.0"
 torchsummary = "^1.5.1"
-numpy = "^1.23.4"
+numpy = ">=1.23.4,<2.0"  # held <2.0: imgaug 0.4.0 uses removed numpy aliases
 
 [tool.poetry.dev-dependencies]
 profilehooks = "^1.12.0"
