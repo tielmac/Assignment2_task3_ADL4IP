@@ -5,10 +5,12 @@ from __future__ import division
 import os
 import argparse
 import tqdm
+import warnings
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, WeightedRandomSampler
 import torch.optim as optim
+import numpy as np
 
 from pytorchyolo.models import load_model
 from pytorchyolo.utils.logger import Logger
@@ -25,7 +27,88 @@ from terminaltables import AsciiTable
 from torchsummary import summary
 
 
-def _create_data_loader(img_path, batch_size, img_size, n_cpu, multiscale_training=False):
+def _create_weighted_sampler(dataset):
+    """Build a weighted sampler that oversamples images containing rare classes."""
+    class_counts = {}
+    image_classes = []
+
+    for label_path in dataset.label_files:
+        label_path = label_path.rstrip()
+        classes_in_image = set()
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                boxes = np.loadtxt(label_path).reshape(-1, 5)
+            classes_in_image = set(boxes[:, 0].astype(int).tolist())
+        except Exception:
+            # Missing/empty labels are treated as background-only samples.
+            classes_in_image = set()
+
+        image_classes.append(classes_in_image)
+        for cls in classes_in_image:
+            class_counts[cls] = class_counts.get(cls, 0) + 1
+
+    if not class_counts:
+        return None, None
+
+    class_weights = {cls: 1.0 / max(count, 1) for cls, count in class_counts.items()}
+    mean_weight = float(np.mean(list(class_weights.values())))
+    class_weights = {cls: w / mean_weight for cls, w in class_weights.items()}
+
+    image_weights = []
+    for classes_in_image in image_classes:
+        if classes_in_image:
+            image_weights.append(max(class_weights[cls] for cls in classes_in_image))
+        else:
+            image_weights.append(1.0)
+
+    sampler = WeightedRandomSampler(
+        weights=torch.as_tensor(image_weights, dtype=torch.double),
+        num_samples=len(image_weights),
+        replacement=True,
+    )
+    sampling_stats = {
+        "class_counts": class_counts,
+        "class_weights": class_weights,
+        "num_images": len(image_weights),
+        "num_labeled_images": sum(1 for classes in image_classes if classes),
+    }
+    return sampler, sampling_stats
+
+
+def _print_weighted_sampling_report(class_names, sampling_stats):
+    """Print per-class image counts and normalized sampling weights."""
+    class_counts = sampling_stats["class_counts"]
+    class_weights = sampling_stats["class_weights"]
+    num_images = sampling_stats["num_images"]
+    num_labeled_images = sampling_stats["num_labeled_images"]
+
+    table_rows = [["Class Id", "Class Name", "Images With Class", "Weight"]]
+    for cls_id in sorted(class_counts.keys()):
+        class_name = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+        table_rows.append([
+            str(cls_id),
+            class_name,
+            str(class_counts[cls_id]),
+            f"{class_weights[cls_id]:.4f}",
+        ])
+
+    print("\n---- Weighted Sampling Report ----")
+    print(f"Total training images: {num_images}")
+    print(f"Labeled images: {num_labeled_images}")
+    print(f"Images without labels: {num_images - num_labeled_images}")
+    print(AsciiTable(table_rows).table)
+
+
+def _create_data_loader(
+        img_path,
+        batch_size,
+        img_size,
+        n_cpu,
+        multiscale_training=False,
+        weighted_sampling=False,
+        class_names=None):
     """Creates a DataLoader for training.
 
     :param img_path: Path to file containing all paths to training images.
@@ -46,10 +129,21 @@ def _create_data_loader(img_path, batch_size, img_size, n_cpu, multiscale_traini
         img_size=img_size,
         multiscale=multiscale_training,
         transform=AUGMENTATION_TRANSFORMS)
+
+    sampler = None
+    if weighted_sampling:
+        sampler, sampling_stats = _create_weighted_sampler(dataset)
+        if sampler is None:
+            print("\n---- Weighted Sampling Report ----")
+            print("No class labels were found. Falling back to default shuffled sampling.")
+        elif class_names is not None:
+            _print_weighted_sampling_report(class_names, sampling_stats)
+
     dataloader = DataLoader(
         dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=sampler is None,
+        sampler=sampler,
         num_workers=n_cpu,
         pin_memory=True,
         collate_fn=dataset.collate_fn,
@@ -69,6 +163,7 @@ def run():
     parser.add_argument("--checkpoint_interval", type=int, default=1, help="Interval of epochs between saving model weights")
     parser.add_argument("--evaluation_interval", type=int, default=1, help="Interval of epochs between evaluations on validation set")
     parser.add_argument("--multiscale_training", action="store_true", help="Allow multi-scale training")
+    parser.add_argument("--weighted_sampling", action="store_true", help="Enable on-the-go class-aware weighted image sampling")
     parser.add_argument("--iou_thres", type=float, default=0.5, help="Evaluation: IOU threshold required to qualify as detected")
     parser.add_argument("--conf_thres", type=float, default=0.1, help="Evaluation: Object confidence threshold")
     parser.add_argument("--nms_thres", type=float, default=0.5, help="Evaluation: IOU threshold for non-maximum suppression")
@@ -115,7 +210,9 @@ def run():
         mini_batch_size,
         model.hyperparams['height'],
         args.n_cpu,
-        args.multiscale_training)
+        args.multiscale_training,
+        args.weighted_sampling,
+        class_names)
 
     # Load validation dataloader
     validation_dataloader = _create_validation_data_loader(
